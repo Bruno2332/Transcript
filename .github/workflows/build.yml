@@ -1,0 +1,68 @@
+name: Release Windows
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'yarn'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Discover Tauri Project Path
+        id: discover
+        shell: powershell
+        run: |
+          $configPath = Get-ChildItem -Recurse -Filter "tauri.conf.json" | Select-Object -First 1
+          if (-not $configPath) {
+            Write-Error "Arquivo tauri.conf.json nao foi encontrado no repositorio."
+            exit 1
+          }
+          $srcTauriFolder = $configPath.Directory.FullName
+          $projectFolder = $configPath.Directory.Parent.FullName
+          
+          # Transforma caminhos absolutos em caminhos relativos ao workspace do GitHub
+          $relativeProject = $projectFolder.Replace($env:GITHUB_WORKSPACE, ".").Replace("\", "/")
+          $relativeSrcTauri = $srcTauriFolder.Replace($env:GITHUB_WORKSPACE, ".").Replace("\", "/")
+          
+          Write-Output "PROJECT_PATH=$relativeProject" >> $env:GITHUB_OUTPUT
+          Write-Output "TAURI_PATH=$relativeSrcTauri" >> $env:GITHUB_OUTPUT
+          
+          Write-Host "Projeto encontrado em: $relativeProject"
+          Write-Host "Pasta src-tauri em: $relativeSrcTauri"
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '${{ steps.discover.outputs.TAURI_PATH }} -> target'
+
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build and Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: '${{ steps.discover.outputs.PROJECT_PATH }}'
+          tagName: app-v__VERSION__
+          releaseName: "App v__VERSION__"
+          releaseBody: "Release automatizada gerada pelo GitHub Actions."
+          releaseDraft: true
+          prerelease: false
