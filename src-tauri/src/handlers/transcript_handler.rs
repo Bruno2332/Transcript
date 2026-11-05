@@ -5,6 +5,7 @@ use crate::{
     dtos::transcript_dto::TranscriptDto,
     services::transcript_service,
 };
+use crate::dtos::pagination::PageResponse;
 use crate::errors::app_errors::AppError;
 
 
@@ -14,17 +15,10 @@ pub async fn find_all_transcripts_paginated(
     page: i64,
     size: i64,
     name: Option<String>,
-) -> Result<Vec<TranscriptDto>, AppError> {
+) -> Result<PageResponse<TranscriptDto>, AppError> {
     transcript_service::find_all_paginated(pool.inner(), page, size, name).await
 }
 
-#[tauri::command]
-pub async fn count_all_transcripts(
-    pool: State<'_, SqlitePool>,
-    name: Option<String>,
-) -> Result<i64, AppError> {
-    transcript_service::count_all(pool.inner(), name).await
-}
 
 #[tauri::command]
 pub async fn insert_transcript(

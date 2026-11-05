@@ -5,6 +5,7 @@ use crate::{
     models::transcript::Transcript,
     repositories::transcript_repository::TranscriptRepository,
 };
+use crate::dtos::pagination::PageResponse;
 use crate::errors::app_errors::AppError;
 
 pub async fn find_all_paginated<R: TranscriptRepository>(
@@ -12,30 +13,31 @@ pub async fn find_all_paginated<R: TranscriptRepository>(
     page: i64,
     size: i64,
     name: Option<String>,
-) -> Result<Vec<TranscriptDto>, AppError> {
+) -> Result<PageResponse<TranscriptDto>, AppError> {
     let transcripts = repository
-        .find_all_paginated(page, size, name)
+        .find_all_paginated(page, size, name.clone())
         .await
         .map_err(|_| AppError::Database {
             message: "Erro ao buscar transcrições".to_string(),
         })?;
 
+    let total = repository.count_all(name).await.map_err(|error| {
+        eprintln!("Erro em count_all: {error:?}");
+        AppError::Database {
+            message: "Erro ao contar alunos".to_string(),
+        }
+    })?;
+
     let items = transcripts.into_iter().map(TranscriptDto::from).collect();
 
-    Ok(items)
+    Ok(PageResponse {
+        items,
+        page,
+        size,
+        total,
+    })
 }
 
-pub async fn count_all<R: TranscriptRepository>(
-    repository: &R,
-    name: Option<String>,
-) -> Result<i64, AppError> {
-    repository
-        .count_all(name)
-        .await
-        .map_err(|_| AppError::Database {
-            message: "Erro ao contar transcrições".to_string(),
-        })
-}
 
 pub async fn insert<R: TranscriptRepository>(
     repository: &R,

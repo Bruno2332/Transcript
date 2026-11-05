@@ -34,7 +34,6 @@ pub fn run() {
             handlers::recording_handler::resume_recording,
             handlers::recording_handler::stop_recording,
             handlers::transcript_handler::find_all_transcripts_paginated,
-            handlers::transcript_handler::count_all_transcripts,
             handlers::transcript_handler::insert_transcript,
             handlers::transcript_handler::update_transcript,
             handlers::transcript_handler::delete_transcript,
