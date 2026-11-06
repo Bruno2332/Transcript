@@ -41,7 +41,7 @@ pub fn record_process(
         None,
     );
 
-    // Captura o áudio que está saindo pelo dispositivo padrão do Windows.
+    // Captura o áudio que está saindo pelo dispositivo padrão do Windows (Reunião/Browser/Teams).
     let output_device = enumerator.get_default_device(&Direction::Render)?;
     let mut output_client = output_device.get_iaudioclient()?;
 
@@ -57,10 +57,10 @@ pub fn record_process(
         &stream_mode,
     )?;
 
-    let _output_event = output_client.set_get_eventhandle()?;
+    let output_event = output_client.set_get_eventhandle()?;
     let output_capture = output_client.get_audiocaptureclient()?;
 
-    // Captura o microfone/dispositivo padrão de entrada do Windows.
+    // Captura o microfone/dispositivo padrão de entrada do Windows (Sua voz).
     let microphone_device = enumerator.get_default_device(&Direction::Capture)?;
     let mut microphone_client = microphone_device.get_iaudioclient()?;
 
@@ -70,7 +70,7 @@ pub fn record_process(
         &stream_mode,
     )?;
 
-    let _microphone_event = microphone_client.set_get_eventhandle()?;
+    let microphone_event = microphone_client.set_get_eventhandle()?;
     let microphone_capture = microphone_client.get_audiocaptureclient()?;
 
     output_client.start_stream()?;
@@ -104,13 +104,15 @@ pub fn record_process(
 
     let mut output_samples = VecDeque::<[f32; CHANNELS]>::new();
     let mut microphone_samples = VecDeque::<[f32; CHANNELS]>::new();
+    let mut mixed_chunk = Vec::with_capacity(INTERLEAVED_SAMPLES_PER_FRAME);
     let mut paused = false;
 
     let recording_result = (|| -> Result<(), Box<dyn Error>> {
         loop {
             let mut stopping = false;
 
-            match commands.recv_timeout(Duration::from_millis(5)) {
+            // Timeout curto para responder rapidamente aos comandos do app
+            match commands.recv_timeout(Duration::from_millis(1)) {
                 Ok(RecordingCommand::Pause) => {
                     paused = true;
                 }
@@ -133,33 +135,35 @@ pub fn record_process(
                 output_samples.clear();
                 microphone_samples.clear();
             } else {
-                correct_queue_skew(&mut output_samples, &mut microphone_samples);
+                // Processa blocos enquanto QUALQUER uma das partes tiver dados acumulados.
+                // Evita que o silêncio de uma ponta congele a gravação da outra.
+                while output_samples.len() >= SAMPLES_PER_FRAME || microphone_samples.len() >= SAMPLES_PER_FRAME {
+                    mixed_chunk.clear();
 
-                let mut mixed_samples = Vec::with_capacity(
-                    output_samples
-                        .len()
-                        .min(microphone_samples.len())
-                        * CHANNELS,
-                );
+                    for _ in 0..SAMPLES_PER_FRAME {
+                        // Se um dos lados não tiver frames disponíveis, assume silêncio dinamicamente [0.0, 0.0]
+                        let output_frame = output_samples.pop_front().unwrap_or([0.0, 0.0]);
+                        let microphone_frame = microphone_samples.pop_front().unwrap_or([0.0, 0.0]);
 
-                while !output_samples.is_empty() && !microphone_samples.is_empty() {
-                    let output_frame = output_samples.pop_front().unwrap();
-                    let microphone_frame = microphone_samples.pop_front().unwrap();
-                    for channel in 0..CHANNELS {
-                        let mixed =
-                            (output_frame[channel] + microphone_frame[channel]) * 0.5;
-                        mixed_samples.push(mixed.clamp(-1.0, 1.0));
+                        for channel in 0..CHANNELS {
+                            // Soma linear das vozes com um ganho compensatório leve para manter clareza na IA
+                            let mixed = (output_frame[channel] + microphone_frame[channel]) * 0.75;
+                            mixed_chunk.push(mixed.clamp(-1.0, 1.0));
+                        }
                     }
-                }
 
-                recorder.write_interleaved(&mixed_samples)?;
+                    recorder.write_interleaved(&mixed_chunk)?;
+                }
             }
 
             if stopping {
                 break;
             }
 
-            thread::sleep(Duration::from_millis(2));
+            // Sincroniza o loop usando os sinais nativos de hardware das placas de áudio.
+            // Impede estouro de uso de CPU e garante que o processamento rode assim que houver dados.
+            let _ = output_event.wait_for_event(10);
+            let _ = microphone_event.wait_for_event(10);
         }
 
         Ok(())
@@ -207,27 +211,6 @@ fn read_available_audio(
     }
 
     Ok(())
-}
-
-fn correct_queue_skew(
-    output_samples: &mut VecDeque<[f32; CHANNELS]>,
-    microphone_samples: &mut VecDeque<[f32; CHANNELS]>,
-) {
-    let difference = output_samples
-        .len()
-        .abs_diff(microphone_samples.len());
-
-    if difference <= MAX_QUEUE_SKEW_FRAMES {
-        return;
-    }
-
-    let frames_to_discard = difference - MAX_QUEUE_SKEW_FRAMES;
-
-    if output_samples.len() > microphone_samples.len() {
-        output_samples.drain(..frames_to_discard);
-    } else {
-        microphone_samples.drain(..frames_to_discard);
-    }
 }
 
 struct OggOpusRecorder<W: Write> {
@@ -281,7 +264,7 @@ impl<W: Write> OggOpusRecorder<W> {
                 io::ErrorKind::InvalidInput,
                 "O bloco de áudio não contém amostras estéreo completas.",
             )
-                .into());
+            .into());
         }
 
         self.input_frames += (samples.len() / CHANNELS) as u64;
@@ -321,69 +304,4 @@ impl<W: Write> OggOpusRecorder<W> {
         self.writer.write_packet(
             final_packet,
             self.serial,
-            PacketWriteEndInfo::EndStream,
-            final_granule_position,
-        )?;
 
-        let mut output = self.writer.into_inner();
-        output.flush()?;
-
-        Ok(())
-    }
-
-    fn write_headers(&mut self, pre_skip: u16) -> Result<(), Box<dyn Error>> {
-        let mut opus_head = Vec::with_capacity(19);
-        opus_head.extend_from_slice(b"OpusHead");
-        opus_head.push(1);
-        opus_head.push(CHANNELS as u8);
-        opus_head.extend_from_slice(&pre_skip.to_le_bytes());
-        opus_head.extend_from_slice(&(SAMPLE_RATE as u32).to_le_bytes());
-        opus_head.extend_from_slice(&0_i16.to_le_bytes());
-        opus_head.push(0);
-
-        self.writer.write_packet(
-            opus_head,
-            self.serial,
-            PacketWriteEndInfo::EndPage,
-            0,
-        )?;
-
-        let vendor = b"transcript";
-        let mut opus_tags = Vec::new();
-        opus_tags.extend_from_slice(b"OpusTags");
-        opus_tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
-        opus_tags.extend_from_slice(vendor);
-        opus_tags.extend_from_slice(&0_u32.to_le_bytes());
-
-        self.writer.write_packet(
-            opus_tags,
-            self.serial,
-            PacketWriteEndInfo::EndPage,
-            0,
-        )?;
-
-        Ok(())
-    }
-
-    fn encode_frame(&mut self, samples: &[f32]) -> Result<(), Box<dyn Error>> {
-        let mut packet = vec![0_u8; 4_000];
-        let packet_size = self.encoder.encode_float(samples, &mut packet)?;
-        packet.truncate(packet_size);
-
-        self.encoded_frames += SAMPLES_PER_FRAME as u64;
-
-        if let Some(previous_packet) = self.pending_packet.replace(packet) {
-            let granule_position =
-                self.pre_skip + self.encoded_frames - SAMPLES_PER_FRAME as u64;
-
-            self.writer.write_packet(
-                previous_packet,
-                self.serial,
-                PacketWriteEndInfo::NormalPacket,
-                granule_position,
-            )?;
-        }
-
-        Ok(())
-    }
-}
