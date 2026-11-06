@@ -5,7 +5,6 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     sync::mpsc::{Receiver, RecvTimeoutError},
-    thread,
     time::Duration,
 };
 
@@ -23,7 +22,6 @@ const CHANNELS: usize = 2;
 const SAMPLES_PER_FRAME: usize = 960;
 const INTERLEAVED_SAMPLES_PER_FRAME: usize = SAMPLES_PER_FRAME * CHANNELS;
 const BYTES_PER_AUDIO_FRAME: usize = CHANNELS * std::mem::size_of::<f32>();
-const MAX_QUEUE_SKEW_FRAMES: usize = 480;
 
 pub fn record_process(
     output_path: PathBuf,
@@ -41,7 +39,6 @@ pub fn record_process(
         None,
     );
 
-    // Captura o áudio que está saindo pelo dispositivo padrão do Windows (pessoas falando na chamada)
     let output_device = enumerator.get_default_device(&Direction::Render)?;
     let mut output_client = output_device.get_iaudioclient()?;
 
@@ -59,7 +56,6 @@ pub fn record_process(
     let output_event = output_client.set_get_eventhandle()?;
     let output_capture = output_client.get_audiocaptureclient()?;
 
-    // Captura o microfone padrão de entrada (sua voz)
     let microphone_device = enumerator.get_default_device(&Direction::Capture)?;
     let mut microphone_client = microphone_device.get_iaudioclient()?;
 
@@ -133,7 +129,6 @@ pub fn record_process(
                 output_samples.clear();
                 microphone_samples.clear();
             } else {
-                // Alinha o fluxo de reunião: se houver dados em qualquer um dos buffers, processa.
                 while output_samples.len() >= SAMPLES_PER_FRAME || microphone_samples.len() >= SAMPLES_PER_FRAME {
                     mixed_chunk.clear();
 
@@ -142,7 +137,6 @@ pub fn record_process(
                         let mic_f = microphone_samples.pop_front().unwrap_or([0.0, 0.0]);
 
                         for channel in 0..CHANNELS {
-                            // Aplica ganho de 0.8 para manter volume das falas audível nas reuniões
                             let mixed = (out_f[channel] + mic_f[channel]) * 0.8;
                             mixed_chunk.push(mixed.clamp(-1.0, 1.0));
                         }
@@ -156,7 +150,6 @@ pub fn record_process(
                 break;
             }
 
-            // Aguarda nativamente o sinal do hardware de áudio para sincronia limpa e baixo uso de CPU
             let _ = output_event.wait_for_event(10);
             let _ = microphone_event.wait_for_event(10);
         }
@@ -313,42 +306,50 @@ impl<W: Write> OggOpusRecorder<W> {
         opus_head.extend_from_slice(&(SAMPLE_RATE as u32).to_le_bytes());
         opus_head.extend_from_slice(&0_i16.to_le_bytes());
         opus_head.push(0);
+
         self.writer.write_packet(
-        opus_head,
-        self.serial,
-        PacketWriteEndInfo::EndPage,
-        0,
+            opus_head,
+            self.serial,
+            PacketWriteEndInfo::EndPage,
+            0,
         )?;
+
         let vendor = b"transcript";
         let mut opus_tags = Vec::new();
         opus_tags.extend_from_slice(b"OpusTags");
         opus_tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
         opus_tags.extend_from_slice(vendor);
         opus_tags.extend_from_slice(&0_u32.to_le_bytes());
+
         self.writer.write_packet(
-        opus_tags,
-        self.serial,
-        PacketWriteEndInfo::EndPage,
-        0,
+            opus_tags,
+            self.serial,
+            PacketWriteEndInfo::EndPage,
+            0,
         )?;
+
         Ok(())
-        }
-    
-    fn encode_frame(&mut self, samples: &[f32]) -> Result<(), Box> {
+    }
+
+    fn encode_frame(&mut self, samples: &[f32]) -> Result<(), Box<dyn Error>> {
         let mut packet = vec![0_u8; 4_000];
         let packet_size = self.encoder.encode_float(samples, &mut packet)?;
         packet.truncate(packet_size);
+
         self.encoded_frames += SAMPLES_PER_FRAME as u64;
+
         if let Some(previous_packet) = self.pending_packet.replace(packet) {
-        let granule_position =
-        self.pre_skip + self.encoded_frames - SAMPLES_PER_FRAME as u64;
-        self.writer.write_packet(
-        previous_packet,
-        self.serial,
-        PacketWriteEndInfo::NormalPacket,
-        granule_position,
-        )?;
+            let granule_position =
+                self.pre_skip + self.encoded_frames - SAMPLES_PER_FRAME as u64;
+
+            self.writer.write_packet(
+                previous_packet,
+                self.serial,
+                PacketWriteEndInfo::NormalPacket,
+                granule_position,
+            )?;
         }
+
         Ok(())
-        }
-        }
+    }
+}
