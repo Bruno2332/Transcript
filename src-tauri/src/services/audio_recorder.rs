@@ -142,9 +142,9 @@ pub fn record_process(
                         * CHANNELS,
                 );
 
-                while let (Some(output_frame), Some(microphone_frame)) =
-                    (output_samples.pop_front(), microphone_samples.pop_front())
-                {
+                while !output_samples.is_empty() && !microphone_samples.is_empty() {
+                    let output_frame = output_samples.pop_front().unwrap();
+                    let microphone_frame = microphone_samples.pop_front().unwrap();
                     for channel in 0..CHANNELS {
                         let mixed =
                             (output_frame[channel] + microphone_frame[channel]) * 0.5;
