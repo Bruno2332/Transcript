@@ -45,3 +45,5 @@ strip = true
 [target."cfg(windows)".dependencies]
 mp3lame-encoder = "0.2.5"
 wasapi = "0.26"
+opus = "0.4"
+ogg = "0.9"

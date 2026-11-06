@@ -3,32 +3,29 @@ use tauri::{Manager, State};
 
 use crate::models::{
     recording_state::RecordingManager,
+    transcript::RecordingCommand,
 };
-use crate::models::transcript::RecordingCommand;
+
+#[cfg(target_os = "windows")]
+use crate::{
+    models::recording_state::RecordingSession,
+    services::audio_recorder,
+};
+
+#[cfg(target_os = "windows")]
+use std::{
+    sync::mpsc,
+    thread,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[tauri::command]
 pub async fn start_recording(
     app: tauri::AppHandle,
     manager: State<'_, RecordingManager>,
-    process_id: u32,
 ) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        use std::{
-            sync::mpsc,
-            thread,
-            time::{SystemTime, UNIX_EPOCH},
-        };
-
-        use crate::{
-            models::recording_state::RecordingSession,
-            services::audio_recorder,
-        };
-
-        if process_id == 0 {
-            return Err("Invalid process ID.".into());
-        }
-
         let mut state = manager
             .state
             .lock()
@@ -57,21 +54,15 @@ pub async fn start_recording(
             .as_nanos();
 
         let output_path =
-            recordings_dir.join(format!("session-{timestamp}.mp3"));
+            recordings_dir.join(format!("session-{timestamp}.ogg"));
 
-        let output_path_string =
-            output_path.to_string_lossy().into_owned();
-
+        let output_path_string = output_path.to_string_lossy().into_owned();
         let (command_sender, command_receiver) = mpsc::channel();
 
         let task = thread::Builder::new()
             .name("audio-recorder".to_string())
             .spawn(move || {
-                audio_recorder::record_process(
-                    process_id,
-                    output_path,
-                    command_receiver,
-                )
+                audio_recorder::record_process(output_path, command_receiver)
                     .map_err(|error| error.to_string())
             })
             .map_err(|error| error.to_string())?;
@@ -87,8 +78,8 @@ pub async fn start_recording(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (app, manager, process_id);
-        Err("Process audio capture requires Windows.".into())
+        let _ = (app, manager);
+        Err("A gravação de áudio está disponível somente no Windows.".into())
     }
 }
 
@@ -127,14 +118,11 @@ pub async fn stop_recording(
             .ok_or_else(|| "There is no recording session.".to_string())?;
 
         state.stopping = true;
-
         session
     };
 
-    // If the worker already failed, joining it retrieves the actual error.
     let _ = session.command_sender.send(RecordingCommand::Stop);
 
-    // Join and cleanup run together even if the caller stops awaiting.
     tauri::async_runtime::spawn_blocking(move || {
         let recording_result = match session.task.join() {
             Ok(result) => result,
@@ -149,10 +137,8 @@ pub async fn stop_recording(
             .map_err(|_| "Unable to access recording state.".to_string())?;
 
         state.stopping = false;
-
         recording_result?;
 
-        // The service has finished flushing and closing the MP3.
         Ok(session.output_path)
     })
         .await
